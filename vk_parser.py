@@ -15,7 +15,7 @@ class VKParser:
         proxy_url = os.getenv("VK_PROXY") or None
 
         # Windows локально → системный Chrome; сервер → Chromium Playwright
-        if channel is None and os.name == "nt":
+        if channel is None:
             channel = "chrome"
 
         self._pw = sync_playwright().start()
