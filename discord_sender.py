@@ -34,7 +34,14 @@ def create_forum_post(
     try:
         for i, url in enumerate(photo_urls[:10]):
             try:
-                r = requests.get(url, timeout=15)
+                r = requests.get(
+                    url,
+                    timeout=15,
+                    headers={
+                        "User-Agent": "Mozilla/5.0",
+                        "Referer": "https://vk.com/",
+                    },
+                )
                 r.raise_for_status()
                 buf = io.BytesIO(r.content)
                 files[f"files[{i}]"] = (f"photo_{i}.jpg", buf, "image/jpeg")

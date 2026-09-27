@@ -5,6 +5,7 @@ from pathlib import Path
 from config import POLL_INTERVAL
 from vk_parser import VKParser
 from discord_sender import create_forum_post
+from discord_presence import start_presence_thread
 
 STATE_FILE = Path("state.json")
 
@@ -20,6 +21,10 @@ def save_state(state: dict):
 
 
 def main():
+    # 1. Запускаем Discord Gateway в фоне — бот станет онлайн
+    start_presence_thread()
+
+    # 2. Запускаем Playwright для VK
     vk = VKParser()
     try:
         html = vk.fetch_topic_html()
@@ -34,30 +39,34 @@ def main():
             print("[!] Не удалось извлечь ни одного поста.")
             return
 
-        print("\n[i] Образец постов (первые 3):")
-        for p in all_posts[:3]:
-            print(f"   id={p['id']} author={p['author'][:40]!r}")
-            print(f"      text={p['text'][:80]!r}")
-            print(f"      photos={len(p['photos'])}")
-
         state = load_state()
 
+        # 3. При первом запуске — ставим last_post_id на 1 меньше максимума,
+        #    чтобы отправить ТОЛЬКО последнюю жалобу и дальше ждать новых.
         if state["last_post_id"] is None:
-            # Отправляем последний пост сразу — ставим last_post_id на 1 меньше
             last_existing = vk._numeric_post_id(all_posts[-1]["id"])
             state["last_post_id"] = last_existing - 1
             save_state(state)
             print(f"\n[i] Первый запуск — старт с post_id={state['last_post_id']}")
             print(f"    Последний пост id={last_existing} будет отправлен сейчас")
 
-        print("\n[i] Запуск цикла. Ждём новые жалобы...\n")
+        print(f"\n[i] Запуск цикла. Проверка каждые {POLL_INTERVAL} сек.")
+        print(f"[i] Ждём посты с id > {state['last_post_id']}\n")
 
+        # 4. Основной цикл с heartbeat-логами
+        check_num = 0
         while True:
+            check_num += 1
+            timestamp = time.strftime("%H:%M:%S")
+
             try:
                 new, max_id = vk.get_new_posts(state["last_post_id"])
+
                 if new:
+                    print(f"[{timestamp}] Проверка #{check_num}: найдено новых — {len(new)}")
                     for p in new:
-                        print(f"[+] {p['author']}: {p['text'][:60]!r}, фото: {len(p['photos'])}")
+                        print(f"    [+] id={p['id']} автор={p['author']!r} фото={len(p['photos'])}")
+                        print(f"        текст: {p['text'][:80]!r}")
                         create_forum_post(
                             text=p["text"],
                             photo_urls=p["photos"],
@@ -68,8 +77,15 @@ def main():
                     if max_id:
                         state["last_post_id"] = max_id
                         save_state(state)
+                        print(f"    [i] last_post_id обновлён → {max_id}")
+                else:
+                    print(
+                        f"[{timestamp}] Проверка #{check_num}: новых нет, "
+                        f"ждём id > {state['last_post_id']}"
+                    )
+
             except Exception as e:
-                print(f"[!] Ошибка цикла: {e}")
+                print(f"[{timestamp}] [!] Ошибка цикла: {e}")
 
             time.sleep(POLL_INTERVAL)
 

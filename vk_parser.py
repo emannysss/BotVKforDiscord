@@ -1,27 +1,20 @@
 import os
 import re
 import time
+from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
-from config import VK_GROUP_ID, VK_TOPIC_ID
+from config import VK_GROUP_ID, VK_TOPIC_ID, VK_TOPIC_URL
 
 
-MOBILE_URL = f"https://m.vk.com/topic-{VK_GROUP_ID}_{VK_TOPIC_ID}"
 BASE = "https://m.vk.com"
 
 
 class VKParser:
     def __init__(self, headless: bool = True, channel: str | None = None):
-        """
-        headless=True   — браузер без окна (для сервера)
-        headless=False  — с окном (для отладки локально)
-        channel=None    — авто: Windows → "chrome", Linux/сервер → Chromium Playwright
-        channel="chrome"|"msedge" — явно указать системный браузер
-        """
-        proxy_url = os.getenv("VK_PROXY")  # только для VK, Discord не трогаем
+        proxy_url = os.getenv("VK_PROXY") or None
 
-        # Автодетект канала: локально на Windows пробуем системный Chrome,
-        # на сервере используем чистый Chromium Playwright
+        # Windows локально → системный Chrome; сервер → Chromium Playwright
         if channel is None and os.name == "nt":
             channel = "chrome"
 
@@ -30,11 +23,19 @@ class VKParser:
         launch_kwargs = {"headless": headless}
         if channel:
             launch_kwargs["channel"] = channel
+
         if proxy_url:
-            launch_kwargs["proxy"] = {"server": proxy_url}
-            # В лог выводим только хвост, без логина и пароля
-            safe = proxy_url.split("@")[-1] if "@" in proxy_url else proxy_url
-            print(f"[VK] Прокси: {safe}")
+            parsed = urlparse(proxy_url)
+            proxy_cfg = {
+                "server": f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"
+            }
+            if parsed.username:
+                proxy_cfg["username"] = parsed.username
+            if parsed.password:
+                proxy_cfg["password"] = parsed.password
+            launch_kwargs["proxy"] = proxy_cfg
+            print(f"[VK] Прокси: {parsed.scheme}://{parsed.hostname}:{parsed.port} "
+                  f"(auth={'yes' if parsed.username else 'no'})")
 
         self.browser = self._pw.chromium.launch(**launch_kwargs)
         self.context = self.browser.new_context(
@@ -58,7 +59,7 @@ class VKParser:
                 pass
 
     def fetch_topic_html(self) -> str:
-        self.page.goto(MOBILE_URL, wait_until="domcontentloaded", timeout=60000)
+        self.page.goto(VK_TOPIC_URL, wait_until="domcontentloaded", timeout=60000)
         try:
             self.page.wait_for_selector(
                 ".post_item, [id^='topic_comment-']",
@@ -82,10 +83,7 @@ class VKParser:
         soup = BeautifulSoup(html, "lxml")
         posts = []
 
-        # id вида "topic_comment-149167439_197140"
-        containers = soup.select("[id^='topic_comment-']")
-
-        for div in containers:
+        for div in soup.select("[id^='topic_comment-']"):
             raw_id = div.get("id", "")
             m = re.match(r"topic_comment-(\d+)_(\d+)$", raw_id)
             if not m:
@@ -112,13 +110,11 @@ class VKParser:
                     if mm:
                         url = mm.group(1)
                 if url and url.startswith("http"):
-                    # VK дописывает мусор через | или %7C и плодит невалидные cs=
                     url = url.split("|")[0].split("%7C")[0]
                     url = re.sub(r"[?&]cs=[^&]*", "", url)
                     if url not in photos:
                         photos.append(url)
 
-            # doc-файлы (скриншоты, залитые как документы) — ссылки на страницу файла
             for doc in div.select("a.medias_link[href*='/doc']"):
                 href = doc.get("href", "")
                 if href.startswith("/"):
