@@ -23,6 +23,7 @@ def create_forum_post(
     author: str,
     topic_title: str,
     source_url: str | None = None,
+    date: str | None = None,
 ) -> str | None:
     headers = {
         "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
@@ -50,6 +51,8 @@ def create_forum_post(
                 print(f"[Discord] Фото не скачалось ({url}): {e}")
 
         lines = [f"**Тема:** {topic_title}", f"**Автор:** {author}"]
+        if date:
+            lines.append(f"**Дата:** {date}")
         if text:
             lines += ["", _escape(text)]
         if source_url:

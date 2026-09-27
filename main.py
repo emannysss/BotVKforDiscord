@@ -39,10 +39,17 @@ def main():
             print("[!] Не удалось извлечь ни одного поста.")
             return
 
+        # Показываем образец — видно, что это последняя страница
+        print("\n[i] Образец последних постов:")
+        for p in all_posts[-3:]:
+            print(f"   id={p['id']} date={p['date']!r} author={p['author'][:40]!r}")
+            print(f"      текст: {p['text'][:80]!r}")
+            print(f"      фото: {len(p['photos'])}")
+
         state = load_state()
 
-        # 3. При первом запуске — ставим last_post_id на 1 меньше максимума,
-        #    чтобы отправить ТОЛЬКО последнюю жалобу и дальше ждать новых.
+        # 3. При первом запуске ставим last_post_id на 1 меньше максимума
+        #    — отправим ТОЛЬКО последнюю жалобу, дальше ждём новые
         if state["last_post_id"] is None:
             last_existing = vk._numeric_post_id(all_posts[-1]["id"])
             state["last_post_id"] = last_existing - 1
@@ -65,7 +72,8 @@ def main():
                 if new:
                     print(f"[{timestamp}] Проверка #{check_num}: найдено новых — {len(new)}")
                     for p in new:
-                        print(f"    [+] id={p['id']} автор={p['author']!r} фото={len(p['photos'])}")
+                        print(f"    [+] id={p['id']} date={p['date']!r} "
+                              f"автор={p['author']!r} фото={len(p['photos'])}")
                         print(f"        текст: {p['text'][:80]!r}")
                         create_forum_post(
                             text=p["text"],
@@ -73,6 +81,7 @@ def main():
                             author=p["author"],
                             topic_title=topic_title,
                             source_url=p["url"],
+                            date=p.get("date"),
                         )
                     if max_id:
                         state["last_post_id"] = max_id
