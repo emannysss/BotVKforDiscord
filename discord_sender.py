@@ -13,10 +13,8 @@ def _escape(text: str) -> str:
 
 
 def _make_title(author: str, text: str) -> str:
-    base = f"Жалоба от {author}"
-    snippet = (text or "").strip().replace("\n", " ")
-    title = f"{base}: {snippet}" if snippet else base
-    return title[:100]
+    """Заголовок форум-поста — только 'Жалоба от <автор>'."""
+    return f"Жалоба от {author}"[:100]
 
 
 def create_forum_post(

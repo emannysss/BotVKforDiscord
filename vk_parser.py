@@ -1,3 +1,4 @@
+import os
 import re
 import time
 from bs4 import BeautifulSoup
@@ -10,11 +11,31 @@ BASE = "https://m.vk.com"
 
 
 class VKParser:
-    def __init__(self, headless: bool = True, channel: str = "chrome"):
+    def __init__(self, headless: bool = True, channel: str | None = None):
+        """
+        headless=True   — браузер без окна (для сервера)
+        headless=False  — с окном (для отладки локально)
+        channel=None    — авто: Windows → "chrome", Linux/сервер → Chromium Playwright
+        channel="chrome"|"msedge" — явно указать системный браузер
+        """
+        proxy_url = os.getenv("VK_PROXY")  # только для VK, Discord не трогаем
+
+        # Автодетект канала: локально на Windows пробуем системный Chrome,
+        # на сервере используем чистый Chromium Playwright
+        if channel is None and os.name == "nt":
+            channel = "chrome"
+
         self._pw = sync_playwright().start()
+
         launch_kwargs = {"headless": headless}
         if channel:
             launch_kwargs["channel"] = channel
+        if proxy_url:
+            launch_kwargs["proxy"] = {"server": proxy_url}
+            # В лог выводим только хвост, без логина и пароля
+            safe = proxy_url.split("@")[-1] if "@" in proxy_url else proxy_url
+            print(f"[VK] Прокси: {safe}")
+
         self.browser = self._pw.chromium.launch(**launch_kwargs)
         self.context = self.browser.new_context(
             user_agent=(
@@ -23,6 +44,7 @@ class VKParser:
                 "Chrome/125.0.0.0 Mobile Safari/537.36"
             ),
             locale="ru-RU",
+            timezone_id="Europe/Moscow",
             viewport={"width": 412, "height": 915},
         )
         self.page = self.context.new_page()
@@ -36,15 +58,15 @@ class VKParser:
                 pass
 
     def fetch_topic_html(self) -> str:
-        self.page.goto(MOBILE_URL, wait_until="domcontentloaded", timeout=30000)
+        self.page.goto(MOBILE_URL, wait_until="domcontentloaded", timeout=60000)
         try:
             self.page.wait_for_selector(
                 ".post_item, [id^='topic_comment-']",
-                timeout=15000,
+                timeout=30000,
             )
         except PWTimeout:
             pass
-        time.sleep(1.5)
+        time.sleep(2.0)
         return self.page.content()
 
     def get_topic_title(self, html: str) -> str:
@@ -60,7 +82,7 @@ class VKParser:
         soup = BeautifulSoup(html, "lxml")
         posts = []
 
-        # Главное отличие: id вида "topic_comment-XXX_YYY"
+        # id вида "topic_comment-149167439_197140"
         containers = soup.select("[id^='topic_comment-']")
 
         for div in containers:
@@ -68,47 +90,39 @@ class VKParser:
             m = re.match(r"topic_comment-(\d+)_(\d+)$", raw_id)
             if not m:
                 continue
-            post_id = m.group(2)  # числовой id комментария
+            post_id = m.group(2)
 
-            # Автор
             author_el = div.select_one(".pi_author")
             author = author_el.get_text(" ", strip=True) if author_el else "unknown"
 
-            # Текст
             text_el = div.select_one(".pi_text")
             if text_el:
-                # <br> → перенос строки
                 for br in text_el.find_all("br"):
                     br.replace_with("\n")
                 text = text_el.get_text(" ", strip=False).strip()
             else:
                 text = ""
 
-            # Фото — из data-src_big (там полный URL) или background-image
             photos = []
             for img in div.select(".thumb_map_img_as_div"):
                 url = img.get("data-src_big") or ""
                 if not url:
-                    # fallback: парсим background-image в style
                     style = img.get("style", "")
                     mm = re.search(r"url\(['\"]?([^'\")]+)['\"]?\)", style)
                     if mm:
                         url = mm.group(1)
                 if url and url.startswith("http"):
-                    # Убираем мусорный суффикс с | и %7C от VK
+                    # VK дописывает мусор через | или %7C и плодит невалидные cs=
                     url = url.split("|")[0].split("%7C")[0]
-                    # Удаляем cs= полностью — VK сам отдаст разумный размер
                     url = re.sub(r"[?&]cs=[^&]*", "", url)
                     if url not in photos:
                         photos.append(url)
 
-            # Документы-скриншоты → тоже картинки
+            # doc-файлы (скриншоты, залитые как документы) — ссылки на страницу файла
             for doc in div.select("a.medias_link[href*='/doc']"):
                 href = doc.get("href", "")
                 if href.startswith("/"):
-                    # Сохраняем как ссылку — Discord не прикрепит, но покажем
-                    doc_url = BASE + href
-                    photos.append(doc_url)
+                    photos.append(BASE + href)
 
             posts.append({
                 "id": post_id,
