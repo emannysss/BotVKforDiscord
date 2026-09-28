@@ -19,7 +19,20 @@ class VKParser:
             channel = "chrome"
 
         self._pw = sync_playwright().start()
-        launch_kwargs = {"headless": headless, "channel": channel}
+
+        launch_kwargs = {
+            "headless": headless,
+            "channel": channel,
+            "args": [
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--disable-accelerated-2d-canvas",
+                "--disable-software-rasterizer",
+                "--disable-extensions",
+                "--disable-background-networking",
+            ],
+        }
 
         if proxy_url:
             parsed = urlparse(proxy_url)
@@ -45,6 +58,17 @@ class VKParser:
             timezone_id="Europe/Moscow",
             viewport={"width": 412, "height": 915},
         )
+
+        # Блокируем картинки/видео/шрифты — экономим память и трафик.
+        # HTML и JS грузятся, парсер работает.
+        def _block_heavy(route):
+            if route.request.resource_type in ("image", "media", "font"):
+                route.abort()
+            else:
+                route.continue_()
+
+        self.context.route("**/*", _block_heavy)
+
         self.page = self.context.new_page()
 
     def close(self):
@@ -60,14 +84,12 @@ class VKParser:
         soup = BeautifulSoup(html, "lxml")
         pagination = soup.select_one(".pagination")
         if pagination:
-            # Вариант 1: ссылка с символом » (последняя страница)
             for a in pagination.select("a.pg_link"):
                 if a.get_text(strip=True) == "»":
                     href = a.get("href", "")
                     if href:
                         return BASE + href if href.startswith("/") else href
 
-            # Вариант 2: максимальный offset среди ссылок
             offsets = []
             for a in pagination.select("a.pg_link"):
                 href = a.get("href", "")
@@ -81,8 +103,8 @@ class VKParser:
         return VK_TOPIC_URL
 
     def fetch_topic_html(self) -> str:
-        # 1. Загружаем первую страницу, чтобы найти offset последней
-        self.page.goto(VK_TOPIC_URL, wait_until="domcontentloaded", timeout=60000)
+        # 1. Первая страница — чтобы найти offset последней
+        self.page.goto(VK_TOPIC_URL, wait_until="domcontentloaded", timeout=90000)
         try:
             self.page.wait_for_selector(
                 ".post_item, [id^='topic_comment-'], .pagination",
@@ -92,14 +114,12 @@ class VKParser:
             pass
 
         first_html = self.page.content()
-
-        # 2. Определяем URL последней страницы
         last_url = self.get_last_page_url(first_html)
 
-        # 3. Если это не та же страница — переходим на неё
+        # 2. Грузим последнюю страницу
         if last_url and last_url != VK_TOPIC_URL:
             print(f"[VK] Загружаю последнюю страницу: {last_url}")
-            self.page.goto(last_url, wait_until="domcontentloaded", timeout=60000)
+            self.page.goto(last_url, wait_until="domcontentloaded", timeout=90000)
             try:
                 self.page.wait_for_selector(
                     ".post_item, [id^='topic_comment-']",
@@ -134,7 +154,6 @@ class VKParser:
             author_el = div.select_one(".pi_author")
             author = author_el.get_text(" ", strip=True) if author_el else "unknown"
 
-            # Дата публикации
             date_el = div.select_one(".item_date")
             date_str = date_el.get_text(" ", strip=True) if date_el else ""
 

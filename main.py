@@ -2,12 +2,19 @@ import json
 import time
 from pathlib import Path
 
-from config import POLL_INTERVAL
+from config import POLL_INTERVAL, VK_GROUP_ID, DISCORD_TAG_NEW
 from vk_parser import VKParser
 from discord_sender import create_forum_post
 from discord_presence import start_presence_thread
+from thread_updater import process_replies
 
 STATE_FILE = Path("state.json")
+THREADS_FILE = Path("threads.json")
+
+STAFF_MARKERS = (
+    "Команда модерации MineBlaze",
+    "Доверенное лицо",
+)
 
 
 def load_state() -> dict:
@@ -20,11 +27,25 @@ def save_state(state: dict):
     STATE_FILE.write_text(json.dumps(state))
 
 
+def load_threads() -> dict:
+    if THREADS_FILE.exists():
+        return json.loads(THREADS_FILE.read_text())
+    return {}
+
+
+def save_threads(threads: dict):
+    THREADS_FILE.write_text(json.dumps(threads, indent=2, ensure_ascii=False))
+
+
+def is_staff_reply(text: str) -> bool:
+    if not text:
+        return False
+    return any(marker in text for marker in STAFF_MARKERS)
+
+
 def main():
-    # 1. Запускаем Discord Gateway в фоне — бот станет онлайн
     start_presence_thread()
 
-    # 2. Запускаем Playwright для VK
     vk = VKParser()
     try:
         html = vk.fetch_topic_html()
@@ -39,62 +60,89 @@ def main():
             print("[!] Не удалось извлечь ни одного поста.")
             return
 
-        # Показываем образец — видно, что это последняя страница
         print("\n[i] Образец последних постов:")
         for p in all_posts[-3:]:
-            print(f"   id={p['id']} date={p['date']!r} author={p['author'][:40]!r}")
-            print(f"      текст: {p['text'][:80]!r}")
-            print(f"      фото: {len(p['photos'])}")
+            extra = ""
+            if p.get("reply_to"):
+                extra = f" reply_to={p['reply_to']} status={p.get('status')}"
+            print(f"   id={p['id']} date={p['date']!r} author={p['author'][:30]!r}{extra}")
 
         state = load_state()
+        threads = load_threads()
 
-        # 3. При первом запуске ставим last_post_id на 1 меньше максимума
-        #    — отправим ТОЛЬКО последнюю жалобу, дальше ждём новые
         if state["last_post_id"] is None:
             last_existing = vk._numeric_post_id(all_posts[-1]["id"])
             state["last_post_id"] = last_existing - 1
             save_state(state)
             print(f"\n[i] Первый запуск — старт с post_id={state['last_post_id']}")
-            print(f"    Последний пост id={last_existing} будет отправлен сейчас")
 
         print(f"\n[i] Запуск цикла. Проверка каждые {POLL_INTERVAL} сек.")
-        print(f"[i] Ждём посты с id > {state['last_post_id']}\n")
+        print(f"[i] Ждём посты с id > {state['last_post_id']}")
+        print(f"[i] Отслеживаем ответы модераторов для {len(threads)} жалоб\n")
 
-        # 4. Основной цикл с heartbeat-логами
         check_num = 0
         while True:
             check_num += 1
-            timestamp = time.strftime("%H:%M:%S")
+            ts = time.strftime("%H:%M:%S")
 
             try:
-                new, max_id = vk.get_new_posts(state["last_post_id"])
+                html = vk.fetch_topic_html()
+                all_posts = vk.parse_posts(html)
 
-                if new:
-                    print(f"[{timestamp}] Проверка #{check_num}: найдено новых — {len(new)}")
-                    for p in new:
-                        print(f"    [+] id={p['id']} date={p['date']!r} "
-                              f"автор={p['author']!r} фото={len(p['photos'])}")
-                        print(f"        текст: {p['text'][:80]!r}")
-                        create_forum_post(
+                if not all_posts:
+                    print(f"[{ts}] Проверка #{check_num}: страница пустая")
+                    time.sleep(POLL_INTERVAL)
+                    continue
+
+                # 1. Обновляем теги по ответам модераторов
+                updated = process_replies(all_posts, threads)
+                if updated:
+                    save_threads(threads)
+                    print(f"[{ts}] Обновлено тегов: {updated}")
+
+                # 2. Ищем новые жалобы
+                new_posts = [
+                    p for p in all_posts
+                    if vk._numeric_post_id(p["id"]) > state["last_post_id"]
+                ]
+                new_posts.sort(key=lambda p: vk._numeric_post_id(p["id"]))
+
+                if new_posts:
+                    print(f"[{ts}] Проверка #{check_num}: новых — {len(new_posts)}")
+                    for p in new_posts:
+                        if is_staff_reply(p["text"]):
+                            print(f"    [skip] id={p['id']} — ответ сотрудника")
+                            continue
+
+                        print(f"    [+] id={p['id']} date={p.get('date')!r} "
+                              f"автор={p['author']!r} фото={len(p.get('photos', []))}")
+                        thread_id = create_forum_post(
                             text=p["text"],
                             photo_urls=p["photos"],
                             author=p["author"],
                             topic_title=topic_title,
                             source_url=p["url"],
                             date=p.get("date"),
+                            tag_ids=[DISCORD_TAG_NEW] if DISCORD_TAG_NEW else None,
                         )
-                    if max_id:
-                        state["last_post_id"] = max_id
-                        save_state(state)
-                        print(f"    [i] last_post_id обновлён → {max_id}")
+                        if thread_id:
+                            threads[p["id"]] = {
+                                "thread_id": thread_id,
+                                "status": "new",
+                                "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                            }
+                            save_threads(threads)
+
+                    max_id = vk._numeric_post_id(new_posts[-1]["id"])
+                    state["last_post_id"] = max_id
+                    save_state(state)
+                    print(f"    [i] last_post_id обновлён → {max_id}")
                 else:
-                    print(
-                        f"[{timestamp}] Проверка #{check_num}: новых нет, "
-                        f"ждём id > {state['last_post_id']}"
-                    )
+                    print(f"[{ts}] Проверка #{check_num}: новых нет, "
+                          f"ждём id > {state['last_post_id']}")
 
             except Exception as e:
-                print(f"[{timestamp}] [!] Ошибка цикла: {e}")
+                print(f"[{ts}] [!] Ошибка цикла: {e}")
 
             time.sleep(POLL_INTERVAL)
 

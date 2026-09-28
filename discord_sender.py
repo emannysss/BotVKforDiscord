@@ -13,7 +13,6 @@ def _escape(text: str) -> str:
 
 
 def _make_title(author: str, text: str) -> str:
-    """Заголовок форум-поста — только 'Жалоба от <автор>'."""
     return f"Жалоба от {author}"[:100]
 
 
@@ -24,6 +23,7 @@ def create_forum_post(
     topic_title: str,
     source_url: str | None = None,
     date: str | None = None,
+    tag_ids: list[str] | None = None,
 ) -> str | None:
     headers = {
         "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
@@ -71,6 +71,8 @@ def create_forum_post(
                 "attachments": attachments_meta,
             },
         }
+        if tag_ids:
+            payload["applied_tags"] = tag_ids[:5]
 
         resp = requests.post(
             f"{DISCORD_API}/channels/{DISCORD_FORUM_CHANNEL_ID}/threads",
